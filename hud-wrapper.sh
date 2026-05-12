@@ -28,4 +28,5 @@ if [ -n "$DISPLAY" ]; then
     done
 fi
 
+export QT_QPA_PLATFORM=xcb
 exec python3 "$HUD_SCRIPT"

@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import tkinter as tk
-from tkinter import font as tkfont
-import psutil
-import subprocess
+"""
+Linux Floating HUD - PyQt6 + XCB (transparencia real)
+Una linea, esquina inferior derecha, fondo transparente.
+"""
+
 import os
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
+import sys
 import time
 import re
+import subprocess
 import signal
-import sys
+
+import psutil
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont
 
 COLOR_TEXTO = "#39FF14"
 UPDATE_MS = 500
@@ -152,43 +161,45 @@ class DataCollector:
         return None
 
 
-class HUD(tk.Tk):
+class HUD(QWidget):
     def __init__(self):
         super().__init__()
-        self.title("HUD")
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.configure(bg="black")
-        self.attributes("-alpha", 0.85)
-
-        self.fuente = tkfont.Font(family="Liberation Mono", size=10, weight="bold")
-
-        self.label = tk.Label(self, text="Iniciando...", font=self.fuente,
-                              fg=COLOR_TEXTO, bg="black")
-        self.label.pack(padx=6, pady=2)
-
-        self.bind("<Button-1>", self._start_drag)
-        self.bind("<B1-Motion>", self._drag)
-        self.bind("<Button-3>", lambda e: self.destroy())
-        self.bind("<Escape>", lambda e: self.destroy())
-
-        self._drag_x = 0
-        self._drag_y = 0
-        self._dragging = False
-
         self.collector = DataCollector()
+        self._build_ui()
         self._update()
 
-    def _start_drag(self, ev):
-        self._drag_x = ev.x
-        self._drag_y = ev.y
-        self._dragging = True
+    def _build_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-    def _drag(self, ev):
-        if self._dragging:
-            x = self.winfo_x() + ev.x - self._drag_x
-            y = self.winfo_y() + ev.y - self._drag_y
-            self.geometry(f"+{x}+{y}")
+        font = QFont("Liberation Mono", 10)
+        font.setBold(True)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+
+        self.label = QLabel("HUD...")
+        self.label.setFont(font)
+        self.label.setStyleSheet(f"""
+            color: {COLOR_TEXTO};
+            background-color: transparent;
+            padding: 2px 8px;
+        """)
+        self.label.setParent(self)
+        self.label.move(0, 0)
+
+        screen = QApplication.primaryScreen().geometry()
+        self._screen_w = screen.width()
+        self._screen_h = screen.height()
+
+        self._drag_pos = None
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update)
+        self.timer.start(UPDATE_MS)
 
     def _update(self):
         parts = []
@@ -250,19 +261,30 @@ class HUD(tk.Tk):
             parts.append("D:--")
 
         text = " | ".join(parts)
-        self.label.config(text=text)
-        self.label.update_idletasks()
+        self.label.setText(text)
+        self.label.adjustSize()
+        self.resize(self.label.size())
 
-        self.update_idletasks()
-        w = self.winfo_width()
-        h = self.winfo_height()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = sw - w - MARGEN_X
-        y = sh - h - MARGEN_Y
-        self.geometry(f"+{x}+{y}")
+        x = self._screen_w - self.width() - MARGEN_X
+        y = self._screen_h - self.height() - MARGEN_Y
+        self.move(x, y)
 
-        self.after(UPDATE_MS, self._update)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.close()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
 
 
 def _sig(signum, frame):
@@ -272,5 +294,7 @@ def _sig(signum, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
-    app = HUD()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    hud = HUD()
+    hud.show()
+    sys.exit(app.exec())
