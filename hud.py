@@ -1,34 +1,28 @@
-#!/usr/bin/env python3
+#!/home/coreas/hud-venv/bin/python3
 # -*- coding: utf-8 -*-
 """
-Linux Floating HUD - Tkinter + X11 transparency
-Una sola linea, esquina inferior derecha, fondo transparente.
+Linux Floating HUD - PyQt6 compacto con fondo semi-transparente.
+Una sola linea, esquina inferior derecha, funciona en Wayland/X11.
 """
 
-import tkinter as tk
-from tkinter import font as tkfont
-import psutil
-import subprocess
+import sys
 import os
 import time
 import re
+import subprocess
 import signal
-import sys
-from ctypes import cdll
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+import psutil
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont
+
 COLOR_TEXTO = "#39FF14"
-COLOR_ALERTA = "#FF3333"
-COLOR_ADVERTENCIA = "#FFAA00"
+COLOR_FONDO = "rgba(0, 0, 0, 0.45)"
 UPDATE_MS = 500
-MARGEN_X = 20
-MARGEN_Y = 20
+MARGEN_X = 10
+MARGEN_Y = 10
 
-# ---------------------------------------------------------------------------
-# DATA COLLECTORS
-# ---------------------------------------------------------------------------
 class DataCollector:
     def __init__(self):
         self.amd_path = self._find_amd_card()
@@ -166,150 +160,132 @@ class DataCollector:
         return None
 
 
-# ---------------------------------------------------------------------------
-# HUD
-# ---------------------------------------------------------------------------
-class HUD(tk.Tk):
+class HUD(QWidget):
     def __init__(self):
         super().__init__()
-        self.title("System HUD")
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.configure(bg="black")
-
-        self.fuente = tkfont.Font(family="Liberation Mono", size=12, weight="bold")
-
-        self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, height=30)
-        self.canvas.pack(fill="both", expand=True)
-
-        self.text_id = self.canvas.create_text(10, 15, text="Iniciando...",
-                                               fill=COLOR_TEXTO, font=self.fuente,
-                                               anchor="w")
-
-        self.bind("<Button-1>", self._start_drag)
-        self.bind("<B1-Motion>", self._drag)
-        self.bind("<Button-3>", lambda e: self.destroy())
-        self.bind("<Escape>", lambda e: self.destroy())
-
-        self._drag_x = 0
-        self._drag_y = 0
-        self._dragging = False
-
         self.collector = DataCollector()
-
-        # Aplicar transparencia X11
-        self.after(100, self._apply_transparency)
-
+        self._build_ui()
         self._update()
 
-    def _apply_transparency(self):
-        try:
-            x11 = cdll.LoadLibrary("libX11.so.6")
-            self.update_idletasks()
-            dpy = x11.XOpenDisplay(None)
-            if not dpy:
-                return
+    def _build_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-            root_id = self.winfo_id()
-            x11.XSetWindowBackgroundPixmap(dpy, root_id, 0)
-            x11.XClearWindow(dpy, root_id)
+        font = QFont("Liberation Mono", 10)
+        font.setBold(True)
+        font.setStyleHint(QFont.StyleHint.Monospace)
 
-            canvas_id = self.canvas.winfo_id()
-            x11.XSetWindowBackgroundPixmap(dpy, canvas_id, 0)
-            x11.XClearWindow(dpy, canvas_id)
+        self.label = QLabel("HUD...")
+        self.label.setFont(font)
+        self.label.setStyleSheet(f"""
+            color: {COLOR_TEXTO};
+            background-color: {COLOR_FONDO};
+            padding: 2px 8px;
+            border-radius: 4px;
+        """)
 
-            x11.XFlush(dpy)
-            x11.XCloseDisplay(dpy)
-        except Exception:
-            pass
+        self.label.setParent(self)
+        self.label.move(0, 0)
 
-    def _start_drag(self, ev):
-        self._drag_x = ev.x
-        self._drag_y = ev.y
-        self._dragging = True
+        screen = QApplication.primaryScreen().geometry()
+        self._screen_w = screen.width()
+        self._screen_h = screen.height()
 
-    def _drag(self, ev):
-        if self._dragging:
-            x = self.winfo_x() + ev.x - self._drag_x
-            y = self.winfo_y() + ev.y - self._drag_y
-            self.geometry(f"+{x}+{y}")
+        self._drag_pos = None
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update)
+        self.timer.start(UPDATE_MS)
 
     def _update(self):
         parts = []
 
         try:
             cpu_pct, cpu_ghz, cpu_temp = self.collector.cpu()
-            s = f"CPU: {cpu_pct:4.1f}%"
+            s = f"C:{cpu_pct:4.1f}%"
             if cpu_ghz is not None:
-                s += f" @ {cpu_ghz:.1f}GHz"
+                s += f"@{cpu_ghz:.1f}G"
             if cpu_temp is not None:
-                s += f" | {cpu_temp:.0f}C"
+                s += f"|{cpu_temp:.0f}C"
             parts.append(s)
         except Exception:
-            parts.append("CPU: --")
+            parts.append("C:--")
 
         try:
-            ram_pct, used_gb, total_gb = self.collector.ram()
-            parts.append(f"RAM: {used_gb:.1f}/{total_gb:.1f}GB")
+            _, used_gb, total_gb = self.collector.ram()
+            parts.append(f"R:{used_gb:.1f}/{total_gb:.1f}G")
         except Exception:
-            parts.append("RAM: --")
+            parts.append("R:--")
 
         try:
             nv_u, nv_t, nv_p = self.collector.nvidia()
             if nv_u is not None:
-                s = f"NVIDIA: {nv_u:.0f}%"
+                s = f"N:{nv_u:.0f}%"
                 if nv_t is not None:
-                    s += f" | {nv_t:.0f}C"
+                    s += f"|{nv_t:.0f}C"
                 if nv_p is not None:
-                    s += f" | {nv_p:.1f}W"
+                    s += f"|{nv_p:.1f}W"
                 parts.append(s)
             else:
-                parts.append("NVIDIA: --")
+                parts.append("N:--")
         except Exception:
-            parts.append("NVIDIA: --")
+            parts.append("N:--")
 
         try:
             amd_u, amd_t = self.collector.amd()
             if amd_u is not None or amd_t is not None:
-                s = "AMD:"
+                s = "A:"
                 if amd_u is not None:
-                    s += f" {amd_u:.0f}%"
+                    s += f"{amd_u:.0f}%"
                 else:
-                    s += " --%"
+                    s += "--%"
                 if amd_t is not None:
-                    s += f" | {amd_t:.0f}C"
+                    s += f"|{amd_t:.0f}C"
                 parts.append(s)
             else:
-                parts.append("AMD: --")
+                parts.append("A:--")
         except Exception:
-            parts.append("AMD: --")
+            parts.append("A:--")
 
         try:
             rr = self.collector.refresh_rate()
             if rr:
-                parts.append(f"DISP: {rr:.1f}Hz")
+                parts.append(f"D:{rr:.0f}Hz")
             else:
-                parts.append("DISP: --")
+                parts.append("D:--")
         except Exception:
-            parts.append("DISP: --")
+            parts.append("D:--")
 
-        text = "  |  ".join(parts)
-        self.canvas.itemconfig(self.text_id, text=text)
+        text = " | ".join(parts)
+        self.label.setText(text)
+        self.label.adjustSize()
+        self.resize(self.label.size())
 
-        # Medir ancho y posicionar en esquina inferior derecha
-        bbox = self.canvas.bbox(self.text_id)
-        if bbox:
-            w = bbox[2] - bbox[0] + 20
-            h = 30
-            sw = self.winfo_screenwidth()
-            sh = self.winfo_screenheight()
-            x = sw - w - MARGEN_X
-            y = sh - h - MARGEN_Y
-            self.geometry(f"{w}x{h}+{x}+{y}")
-            self.canvas.config(width=w, height=h)
-            self.canvas.coords(self.text_id, 10, h // 2)
+        x = self._screen_w - self.width() - MARGEN_X
+        y = self._screen_h - self.height() - MARGEN_Y
+        self.move(x, y)
 
-        self.after(UPDATE_MS, self._update)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.close()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
 
 
 def _sig(signum, frame):
@@ -319,5 +295,7 @@ def _sig(signum, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
-    app = HUD()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    hud = HUD()
+    hud.show()
+    sys.exit(app.exec())

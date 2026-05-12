@@ -28,4 +28,4 @@ if [ -n "$DISPLAY" ]; then
     done
 fi
 
-exec python3 "$HUD_SCRIPT"
+exec /home/coreas/hud-venv/bin/python3 "$HUD_SCRIPT"
