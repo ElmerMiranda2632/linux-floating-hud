@@ -1,24 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HUD Flotante para Ubuntu - Monitor de Sistema en Tiempo Real
-Autor: Asistente AI
-
-Muestra en tiempo real:
-  - CPU: uso % y temperatura
-  - RAM: uso %
-  - GPU NVIDIA (RTX 5060): uso %, temperatura, potencia W
-  - GPU AMD (Radeon 780M): uso % y temperatura
-  - DISPLAY: refresh rate nativo del monitor (Hz)
-
-Nota: En Linux, obtener los FPS reales de una aplicación/juego requiere
-inyección en su pipeline gráfico (como MangoHud). Este HUD muestra el
-refresh rate del monitor como la métrica más fiable disponible sin root.
-
-Controles:
-  - Arrastrar con click izquierdo para mover
-  - Click derecho o tecla Escape para cerrar
-  - Doble click izquierdo para alternar esquina
+Linux Floating HUD - Tkinter + X11 transparency
+Una sola linea, esquina inferior derecha, fondo transparente.
 """
 
 import tkinter as tk
@@ -30,64 +14,27 @@ import time
 import re
 import signal
 import sys
+from ctypes import cdll
 
 # ---------------------------------------------------------------------------
-# CONFIGURACIÓN VISUAL
+# CONFIG
 # ---------------------------------------------------------------------------
-COLOR_TEXTO = "#39FF14"          # Verde neón/fosforescente
-COLOR_ALERTA = "#FF3333"       # Rojo brillante para alertas
-COLOR_ADVERTENCIA = "#FFAA00"  # Naranja para valores medios-altos
-COLOR_FONDO = "black"          # Debe coincidir con el usado en widgets
-FUENTE_NOMBRE = ("Liberation Mono", "DejaVu Sans Mono", "Noto Mono", "Consolas", "monospace")
-FUENTE_TAMANIO = 14
-INTERVALO_MS = 500             # Actualización cada 500 ms
-ANCHO_VENTANA = 400
-ALTO_VENTANA = 170
-POS_X_INICIAL = None           # None = esquina superior derecha
-POS_Y_INICIAL = 40
+COLOR_TEXTO = "#39FF14"
+COLOR_ALERTA = "#FF3333"
+COLOR_ADVERTENCIA = "#FFAA00"
+UPDATE_MS = 500
+MARGEN_X = 20
+MARGEN_Y = 20
 
 # ---------------------------------------------------------------------------
-# UTILIDADES HARDWARE
+# DATA COLLECTORS
 # ---------------------------------------------------------------------------
-def detectar_amd_card():
-    """Busca la tarjeta AMD (vendor 0x1002) en /sys/class/drm/."""
-    base = "/sys/class/drm"
-    if not os.path.isdir(base):
-        return None
-    for entrada in sorted(os.listdir(base)):
-        if entrada.startswith("card") and "-" not in entrada:
-            vendor_path = os.path.join(base, entrada, "device", "vendor")
-            try:
-                with open(vendor_path, "r") as f:
-                    vendor = f.read().strip()
-                if vendor == "0x1002":
-                    return os.path.join(base, entrada, "device")
-            except Exception:
-                continue
-    return None
-
-
-def detectar_nvidia():
-    """Verifica si nvidia-smi está disponible en PATH."""
-    try:
-        subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, check=True, timeout=3)
-        return True
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# RECOLECTOR DE DATOS
-# ---------------------------------------------------------------------------
-class RecolectorDatos:
+class DataCollector:
     def __init__(self):
-        self.amd_path = detectar_amd_card()
-        self.tiene_nvidia = detectar_nvidia()
+        self.amd_path = self._find_amd_card()
+        self.has_nvidia = self._has_nvidia()
         self._refresh_rate = None
-        self._last_refresh_check = 0
-
-        # Intentar cargar pynvml (opcional, más rápido que nvidia-smi)
+        self._refresh_ts = 0
         self.pynvml = None
         try:
             import pynvml
@@ -97,10 +44,38 @@ class RecolectorDatos:
         except Exception:
             pass
 
-    # --- CPU ---
-    def get_cpu(self):
-        uso = psutil.cpu_percent(interval=None)
+    def _find_amd_card(self):
+        base = "/sys/class/drm"
+        if not os.path.isdir(base):
+            return None
+        for ent in sorted(os.listdir(base)):
+            if ent.startswith("card") and "-" not in ent:
+                try:
+                    with open(os.path.join(base, ent, "device", "vendor")) as f:
+                        if f.read().strip() == "0x1002":
+                            return os.path.join(base, ent, "device")
+                except Exception:
+                    pass
+        return None
+
+    def _has_nvidia(self):
+        try:
+            subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=True, timeout=3)
+            return True
+        except Exception:
+            return False
+
+    def cpu(self):
+        pct = psutil.cpu_percent(interval=None)
         temp = None
+        freq_ghz = None
+        try:
+            f = psutil.cpu_freq()
+            if f:
+                freq_ghz = f.current / 1000.0
+        except Exception:
+            pass
         try:
             temps = psutil.sensors_temperatures()
             if "k10temp" in temps:
@@ -108,25 +83,25 @@ class RecolectorDatos:
             elif "coretemp" in temps:
                 temp = temps["coretemp"][0].current
             else:
-                for nombre, lista in temps.items():
-                    if nombre in ("nvme", "amdgpu", "acpitz"):
+                for name, lst in temps.items():
+                    if name in ("nvme", "amdgpu", "acpitz"):
                         continue
-                    if lista:
-                        temp = lista[0].current
+                    if lst:
+                        temp = lst[0].current
                         break
         except Exception:
             pass
-        return uso, temp
+        return pct, freq_ghz, temp
 
-    # --- RAM ---
-    def get_ram(self):
-        return psutil.virtual_memory().percent
+    def ram(self):
+        mem = psutil.virtual_memory()
+        used_gb = mem.used / (1024 ** 3)
+        total_gb = mem.total / (1024 ** 3)
+        return mem.percent, used_gb, total_gb
 
-    # --- NVIDIA ---
-    def get_nvidia(self):
-        if not self.tiene_nvidia:
+    def nvidia(self):
+        if not self.has_nvidia:
             return None, None, None
-
         if self.pynvml:
             try:
                 util = self.pynvml.nvmlDeviceGetUtilizationRates(self.nvml_handle)
@@ -136,39 +111,32 @@ class RecolectorDatos:
                 return util.gpu, temp, power
             except Exception:
                 pass
-
         try:
-            salida = subprocess.check_output(
-                ["nvidia-smi",
-                 "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
-                 "--format=csv,noheader,nounits"],
-                text=True, timeout=2
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
+                 "--format=csv,noheader,nounits"], text=True, timeout=2
             ).strip()
-            partes = [p.strip() for p in salida.split(",")]
-            return float(partes[0]), float(partes[1]), float(partes[2])
+            parts = [p.strip() for p in out.split(",")]
+            return float(parts[0]), float(parts[1]), float(parts[2])
         except Exception:
             return None, None, None
 
-    # --- AMD ---
-    def get_amd(self):
+    def amd(self):
         if not self.amd_path:
             return None, None
-
         uso = None
         temp = None
-
         try:
-            with open(os.path.join(self.amd_path, "gpu_busy_percent"), "r") as f:
+            with open(os.path.join(self.amd_path, "gpu_busy_percent")) as f:
                 uso = float(f.read().strip())
         except Exception:
             pass
-
         try:
-            hwmon_dir = os.path.join(self.amd_path, "hwmon")
-            for entry in os.listdir(hwmon_dir):
-                temp_path = os.path.join(hwmon_dir, entry, "temp1_input")
-                if os.path.exists(temp_path):
-                    with open(temp_path, "r") as f:
+            hw = os.path.join(self.amd_path, "hwmon")
+            for e in os.listdir(hw):
+                tp = os.path.join(hw, e, "temp1_input")
+                if os.path.exists(tp):
+                    with open(tp) as f:
                         temp = float(f.read().strip()) / 1000.0
                     break
         except Exception:
@@ -178,251 +146,178 @@ class RecolectorDatos:
                     temp = temps["amdgpu"][0].current
             except Exception:
                 pass
-
         return uso, temp
 
-    # --- Refresh Rate del monitor ---
-    def get_refresh_rate(self):
-        ahora = time.time()
-        if self._refresh_rate is not None and (ahora - self._last_refresh_check) < 5:
+    def refresh_rate(self):
+        now = time.time()
+        if self._refresh_rate is not None and (now - self._refresh_ts) < 5:
             return self._refresh_rate
-
         try:
-            salida = subprocess.check_output(["xrandr", "--current"],
-                                             text=True, timeout=2)
-            for linea in salida.splitlines():
-                if "*" in linea:
-                    match = re.search(r'(\d+\.?\d*)\*', linea)
-                    if match:
-                        self._refresh_rate = float(match.group(1))
-                        self._last_refresh_check = ahora
+            out = subprocess.check_output(["xrandr", "--current"], text=True, timeout=2)
+            for line in out.splitlines():
+                if "*" in line:
+                    m = re.search(r'(\d+\.?\d*)\*', line)
+                    if m:
+                        self._refresh_rate = float(m.group(1))
+                        self._refresh_ts = now
                         return self._refresh_rate
         except Exception:
             pass
-
-        try:
-            salida = subprocess.check_output(
-                ["nvidia-settings", "-q", "RefreshRate", "-t"],
-                text=True, timeout=2
-            ).strip()
-            self._refresh_rate = float(salida)
-            self._last_refresh_check = ahora
-            return self._refresh_rate
-        except Exception:
-            pass
-
         return None
 
 
 # ---------------------------------------------------------------------------
-# HUD CON TKINTER + TRANSPARENCIA X11
+# HUD
 # ---------------------------------------------------------------------------
 class HUD(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("System HUD")
-
-        ancho_pantalla = self.winfo_screenwidth()
-        x = POS_X_INICIAL if POS_X_INICIAL is not None else (ancho_pantalla - ANCHO_VENTANA - 20)
-        y = POS_Y_INICIAL
-        self.geometry(f"{ANCHO_VENTANA}x{ALTO_VENTANA}+{x}+{y}")
-
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(bg=COLOR_FONDO)
+        self.configure(bg="black")
 
-        self.fuente = tkfont.Font(family=FUENTE_NOMBRE, size=FUENTE_TAMANIO, weight="bold")
+        self.fuente = tkfont.Font(family="Liberation Mono", size=12, weight="bold")
 
-        self.canvas = tk.Canvas(
-            self, width=ANCHO_VENTANA, height=ALTO_VENTANA,
-            bg=COLOR_FONDO, highlightthickness=0
-        )
-        self.canvas.pack()
+        self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, height=30)
+        self.canvas.pack(fill="both", expand=True)
 
-        # Etiquetas estáticas
-        y_pos = 12
-        esp = 28
-        self.canvas.create_text(12, y_pos, text="CPU:", fill=COLOR_TEXTO,
-                                font=self.fuente, anchor="nw")
-        y_pos += esp
-        self.canvas.create_text(12, y_pos, text="RAM:", fill=COLOR_TEXTO,
-                                font=self.fuente, anchor="nw")
-        y_pos += esp
-        self.canvas.create_text(12, y_pos, text="GPU1 (NVIDIA):", fill=COLOR_TEXTO,
-                                font=self.fuente, anchor="nw")
-        y_pos += esp
-        self.canvas.create_text(12, y_pos, text="GPU2 (AMD):", fill=COLOR_TEXTO,
-                                font=self.fuente, anchor="nw")
-        y_pos += esp
-        self.canvas.create_text(12, y_pos, text="DISPLAY:", fill=COLOR_TEXTO,
-                                font=self.fuente, anchor="nw")
+        self.text_id = self.canvas.create_text(10, 15, text="Iniciando...",
+                                               fill=COLOR_TEXTO, font=self.fuente,
+                                               anchor="w")
 
-        # Valores dinámicos
-        y_pos = 12
-        self.text_cpu = self.canvas.create_text(ANCHO_VENTANA - 12, y_pos,
-                                                text="--", fill=COLOR_TEXTO,
-                                                font=self.fuente, anchor="ne")
-        y_pos += esp
-        self.text_ram = self.canvas.create_text(ANCHO_VENTANA - 12, y_pos,
-                                                text="--", fill=COLOR_TEXTO,
-                                                font=self.fuente, anchor="ne")
-        y_pos += esp
-        self.text_nv = self.canvas.create_text(ANCHO_VENTANA - 12, y_pos,
-                                               text="--", fill=COLOR_TEXTO,
-                                               font=self.fuente, anchor="ne")
-        y_pos += esp
-        self.text_amd = self.canvas.create_text(ANCHO_VENTANA - 12, y_pos,
-                                                text="--", fill=COLOR_TEXTO,
-                                                font=self.fuente, anchor="ne")
-        y_pos += esp
-        self.text_disp = self.canvas.create_text(ANCHO_VENTANA - 12, y_pos,
-                                                 text="--", fill=COLOR_TEXTO,
-                                                 font=self.fuente, anchor="ne")
-
-        self._aplicar_transparencia_x11()
-
-        self.bind("<Button-1>", self._iniciar_arrastre)
-        self.bind("<B1-Motion>", self._arrastrar)
+        self.bind("<Button-1>", self._start_drag)
+        self.bind("<B1-Motion>", self._drag)
         self.bind("<Button-3>", lambda e: self.destroy())
         self.bind("<Escape>", lambda e: self.destroy())
-        self.bind("<Double-Button-1>", self._alternar_esquina)
 
-        self._offset_x = 0
-        self._offset_y = 0
-        self._arrastrando = False
+        self._drag_x = 0
+        self._drag_y = 0
+        self._dragging = False
 
-        self.recolector = RecolectorDatos()
-        self._actualizar()
+        self.collector = DataCollector()
 
-    def _aplicar_transparencia_x11(self):
-        """Usa X11 (ctypes) para hacer transparente el fondo de la ventana y el canvas."""
+        # Aplicar transparencia X11
+        self.after(100, self._apply_transparency)
+
+        self._update()
+
+    def _apply_transparency(self):
         try:
-            from ctypes import cdll
             x11 = cdll.LoadLibrary("libX11.so.6")
-
             self.update_idletasks()
-            display = x11.XOpenDisplay(None)
-            if not display:
+            dpy = x11.XOpenDisplay(None)
+            if not dpy:
                 return
 
             root_id = self.winfo_id()
-            x11.XSetWindowBackgroundPixmap(display, root_id, 0)
-            x11.XClearWindow(display, root_id)
+            x11.XSetWindowBackgroundPixmap(dpy, root_id, 0)
+            x11.XClearWindow(dpy, root_id)
 
             canvas_id = self.canvas.winfo_id()
-            x11.XSetWindowBackgroundPixmap(display, canvas_id, 0)
-            x11.XClearWindow(display, canvas_id)
+            x11.XSetWindowBackgroundPixmap(dpy, canvas_id, 0)
+            x11.XClearWindow(dpy, canvas_id)
 
-            x11.XFlush(display)
-            x11.XCloseDisplay(display)
+            x11.XFlush(dpy)
+            x11.XCloseDisplay(dpy)
         except Exception:
             pass
 
-    def _iniciar_arrastre(self, evento):
-        self._offset_x = evento.x
-        self._offset_y = evento.y
-        self._arrastrando = True
+    def _start_drag(self, ev):
+        self._drag_x = ev.x
+        self._drag_y = ev.y
+        self._dragging = True
 
-    def _arrastrar(self, evento):
-        if self._arrastrando:
-            x = self.winfo_x() + evento.x - self._offset_x
-            y = self.winfo_y() + evento.y - self._offset_y
+    def _drag(self, ev):
+        if self._dragging:
+            x = self.winfo_x() + ev.x - self._drag_x
+            y = self.winfo_y() + ev.y - self._drag_y
             self.geometry(f"+{x}+{y}")
 
-    def _alternar_esquina(self, evento):
-        ancho = self.winfo_screenwidth()
-        if self.winfo_x() > ancho // 2:
-            self.geometry(f"+20+{self.winfo_y()}")
-        else:
-            self.geometry(f"+{ancho - ANCHO_VENTANA - 20}+{self.winfo_y()}")
+    def _update(self):
+        parts = []
 
-    def _color(self, valor, normal=COLOR_TEXTO, adv=COLOR_ADVERTENCIA,
-               alerta=COLOR_ALERTA, umbral_adv=70, umbral_alt=85):
-        if valor is None:
-            return normal
-        if valor >= umbral_alt:
-            return alerta
-        if valor >= umbral_adv:
-            return adv
-        return normal
-
-    def _actualizar(self):
         try:
-            cpu_uso, cpu_temp = self.recolector.get_cpu()
-            cpu_str = f"{cpu_uso:5.1f}%"
+            cpu_pct, cpu_ghz, cpu_temp = self.collector.cpu()
+            s = f"CPU: {cpu_pct:4.1f}%"
+            if cpu_ghz is not None:
+                s += f" @ {cpu_ghz:.1f}GHz"
             if cpu_temp is not None:
-                cpu_str += f"  |  {cpu_temp:.0f}°C"
-            self.canvas.itemconfig(self.text_cpu, text=cpu_str, fill=self._color(cpu_uso))
+                s += f" | {cpu_temp:.0f}C"
+            parts.append(s)
         except Exception:
-            pass
+            parts.append("CPU: --")
 
         try:
-            ram_uso = self.recolector.get_ram()
-            self.canvas.itemconfig(self.text_ram, text=f"{ram_uso:5.1f}%",
-                                   fill=self._color(ram_uso))
+            ram_pct, used_gb, total_gb = self.collector.ram()
+            parts.append(f"RAM: {used_gb:.1f}/{total_gb:.1f}GB")
         except Exception:
-            pass
+            parts.append("RAM: --")
 
         try:
-            nv_uso, nv_temp, nv_power = self.recolector.get_nvidia()
-            if nv_uso is not None:
-                nv_str = f"{nv_uso:5.1f}%"
-                if nv_temp is not None:
-                    nv_str += f"  |  {nv_temp:.0f}°C"
-                if nv_power is not None:
-                    nv_str += f"  |  {nv_power:.1f} W"
-                self.canvas.itemconfig(self.text_nv, text=nv_str,
-                                       fill=self._color(nv_uso))
+            nv_u, nv_t, nv_p = self.collector.nvidia()
+            if nv_u is not None:
+                s = f"NVIDIA: {nv_u:.0f}%"
+                if nv_t is not None:
+                    s += f" | {nv_t:.0f}C"
+                if nv_p is not None:
+                    s += f" | {nv_p:.1f}W"
+                parts.append(s)
             else:
-                self.canvas.itemconfig(self.text_nv, text="No detectada", fill="#666666")
+                parts.append("NVIDIA: --")
         except Exception:
-            pass
+            parts.append("NVIDIA: --")
 
         try:
-            amd_uso, amd_temp = self.recolector.get_amd()
-            if amd_uso is not None or amd_temp is not None:
-                amd_str = f"{amd_uso:5.1f}%" if amd_uso is not None else "  --%"
-                if amd_temp is not None:
-                    amd_str += f"  |  {amd_temp:.0f}°C"
-                self.canvas.itemconfig(self.text_amd, text=amd_str,
-                                       fill=self._color(amd_uso))
+            amd_u, amd_t = self.collector.amd()
+            if amd_u is not None or amd_t is not None:
+                s = "AMD:"
+                if amd_u is not None:
+                    s += f" {amd_u:.0f}%"
+                else:
+                    s += " --%"
+                if amd_t is not None:
+                    s += f" | {amd_t:.0f}C"
+                parts.append(s)
             else:
-                self.canvas.itemconfig(self.text_amd, text="No detectada", fill="#666666")
+                parts.append("AMD: --")
         except Exception:
-            pass
+            parts.append("AMD: --")
 
         try:
-            rr = self.recolector.get_refresh_rate()
+            rr = self.collector.refresh_rate()
             if rr:
-                self.canvas.itemconfig(self.text_disp, text=f"{rr:.1f} Hz", fill=COLOR_TEXTO)
+                parts.append(f"DISP: {rr:.1f}Hz")
             else:
-                self.canvas.itemconfig(self.text_disp, text="-- Hz", fill="#666666")
+                parts.append("DISP: --")
         except Exception:
-            pass
+            parts.append("DISP: --")
 
-        self.after(INTERVALO_MS, self._actualizar)
+        text = "  |  ".join(parts)
+        self.canvas.itemconfig(self.text_id, text=text)
+
+        # Medir ancho y posicionar en esquina inferior derecha
+        bbox = self.canvas.bbox(self.text_id)
+        if bbox:
+            w = bbox[2] - bbox[0] + 20
+            h = 30
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = sw - w - MARGEN_X
+            y = sh - h - MARGEN_Y
+            self.geometry(f"{w}x{h}+{x}+{y}")
+            self.canvas.config(width=w, height=h)
+            self.canvas.coords(self.text_id, 10, h // 2)
+
+        self.after(UPDATE_MS, self._update)
 
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-def _signal_handler(signum, frame):
-    print(f"\nSeñal {signum} recibida. Cerrando HUD...")
+def _sig(signum, frame):
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    try:
-        import psutil
-    except ImportError:
-        print("=" * 60)
-        print("ERROR: Falta la biblioteca 'psutil'.")
-        print("Instálala con:  sudo apt install python3-psutil")
-        print("=" * 60)
-        raise SystemExit(1)
-
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
     app = HUD()
     app.mainloop()
