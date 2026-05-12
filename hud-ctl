@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Script de control para el HUD flotante
+
+COMANDO="${1:-status}"
+
+ case "$COMANDO" in
+    start)
+        echo "[HUD] Iniciando servicio..."
+        systemctl --user start hud.service
+        ;;
+    stop)
+        echo "[HUD] Deteniendo servicio..."
+        systemctl --user stop hud.service
+        ;;
+    restart)
+        echo "[HUD] Reiniciando servicio..."
+        systemctl --user restart hud.service
+        ;;
+    enable)
+        echo "[HUD] Habilitando inicio automático..."
+        systemctl --user enable hud.service
+        ;;
+    disable)
+        echo "[HUD] Deshabilitando inicio automático..."
+        systemctl --user disable hud.service
+        ;;
+    status)
+        systemctl --user status hud.service --no-pager
+        ;;
+    logs)
+        journalctl --user -u hud.service -f
+        ;;
+    *)
+        echo "Uso: $0 {start|stop|restart|enable|disable|status|logs}"
+        echo ""
+        echo "  start    - Inicia el HUD ahora"
+        echo "  stop     - Detiene el HUD (no se reiniciará hasta el próximo inicio)"
+        echo "  restart  - Reinicia el HUD"
+        echo "  enable   - Activa inicio automático al encender la PC"
+        echo "  disable  - Desactiva inicio automático"
+        echo "  status   - Muestra estado actual"
+        echo "  logs     - Muestra logs en tiempo real"
+        exit 1
+        ;;
+esac

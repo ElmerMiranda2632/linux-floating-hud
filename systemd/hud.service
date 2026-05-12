@@ -1,0 +1,14 @@
+[Unit]
+Description=Linux Floating HUD - System Monitor
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/linux-floating-hud/hud-wrapper.sh
+Restart=always
+RestartSec=3
+Environment="DISPLAY=:0"
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Linux Floating HUD
+Comment=Monitor de sistema flotante transparente
+Exec=/home/coreas/linux-floating-hud/hud-wrapper.sh
+Type=Application
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
