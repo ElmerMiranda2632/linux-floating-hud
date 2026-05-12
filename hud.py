@@ -1,24 +1,16 @@
-#!/home/coreas/hud-venv/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Linux Floating HUD - PyQt6 compacto con fondo semi-transparente.
-Una sola linea, esquina inferior derecha, funciona en Wayland/X11.
-"""
-
-import sys
+import tkinter as tk
+from tkinter import font as tkfont
+import psutil
+import subprocess
 import os
 import time
 import re
-import subprocess
 import signal
-
-import psutil
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+import sys
 
 COLOR_TEXTO = "#39FF14"
-COLOR_FONDO = "rgba(0, 0, 0, 0.45)"
 UPDATE_MS = 500
 MARGEN_X = 10
 MARGEN_Y = 10
@@ -160,54 +152,50 @@ class DataCollector:
         return None
 
 
-class HUD(QWidget):
+class HUD(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.title("HUD")
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg="black")
+        self.attributes("-alpha", 0.85)
+
+        self.fuente = tkfont.Font(family="Liberation Mono", size=10, weight="bold")
+
+        self.label = tk.Label(self, text="Iniciando...", font=self.fuente,
+                              fg=COLOR_TEXTO, bg="black")
+        self.label.pack(padx=6, pady=2)
+
+        self.bind("<Button-1>", self._start_drag)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<Button-3>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._drag_x = 0
+        self._drag_y = 0
+        self._dragging = False
+
         self.collector = DataCollector()
-        self._build_ui()
         self._update()
 
-    def _build_ui(self):
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowDoesNotAcceptFocus
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    def _start_drag(self, ev):
+        self._drag_x = ev.x
+        self._drag_y = ev.y
+        self._dragging = True
 
-        font = QFont("Liberation Mono", 10)
-        font.setBold(True)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-
-        self.label = QLabel("HUD...")
-        self.label.setFont(font)
-        self.label.setStyleSheet(f"""
-            color: {COLOR_TEXTO};
-            background-color: {COLOR_FONDO};
-            padding: 2px 8px;
-            border-radius: 4px;
-        """)
-
-        self.label.setParent(self)
-        self.label.move(0, 0)
-
-        screen = QApplication.primaryScreen().geometry()
-        self._screen_w = screen.width()
-        self._screen_h = screen.height()
-
-        self._drag_pos = None
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._update)
-        self.timer.start(UPDATE_MS)
+    def _drag(self, ev):
+        if self._dragging:
+            x = self.winfo_x() + ev.x - self._drag_x
+            y = self.winfo_y() + ev.y - self._drag_y
+            self.geometry(f"+{x}+{y}")
 
     def _update(self):
         parts = []
 
         try:
             cpu_pct, cpu_ghz, cpu_temp = self.collector.cpu()
-            s = f"C:{cpu_pct:4.1f}%"
+            s = f"C:{cpu_pct:.0f}%"
             if cpu_ghz is not None:
                 s += f"@{cpu_ghz:.1f}G"
             if cpu_temp is not None:
@@ -262,30 +250,19 @@ class HUD(QWidget):
             parts.append("D:--")
 
         text = " | ".join(parts)
-        self.label.setText(text)
-        self.label.adjustSize()
-        self.resize(self.label.size())
+        self.label.config(text=text)
+        self.label.update_idletasks()
 
-        x = self._screen_w - self.width() - MARGEN_X
-        y = self._screen_h - self.height() - MARGEN_Y
-        self.move(x, y)
+        self.update_idletasks()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = sw - w - MARGEN_X
+        y = sh - h - MARGEN_Y
+        self.geometry(f"+{x}+{y}")
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-        elif event.button() == Qt.MouseButton.RightButton:
-            self.close()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            self.close()
+        self.after(UPDATE_MS, self._update)
 
 
 def _sig(signum, frame):
@@ -295,7 +272,5 @@ def _sig(signum, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
-    app = QApplication(sys.argv)
-    hud = HUD()
-    hud.show()
-    sys.exit(app.exec())
+    app = HUD()
+    app.mainloop()
